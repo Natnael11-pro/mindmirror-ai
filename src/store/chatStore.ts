@@ -2,7 +2,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Message } from '../services/aiService';
-import { getAIResponse, detectEmotion } from '../services/aiService';
+import { getAIResponse, detectEmotion, checkSafety } from '../services/aiService';
 
 export interface Conversation {
   id: string;
@@ -18,12 +18,14 @@ interface ChatState {
   isLoading: boolean;
   currentEmotion: string;
   sidebarOpen: boolean;
+  personality: string; // New state for communication style
   
   // Actions
   addMessage: (message: Message) => void;
   sendMessage: (content: string) => Promise<void>;
   setLoading: (loading: boolean) => void;
   setEmotion: (emotion: string) => void;
+  setPersonality: (personality: string) => void; // New action
   createNewConversation: () => void;
   selectConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
@@ -50,10 +52,11 @@ export const useChatStore = create<ChatState>()(
   persist(
     (set, get) => ({
       conversations: [createInitialConversation()],
-      activeConversationId: null, // Will be set in initialization
+      activeConversationId: null,
       isLoading: false,
       currentEmotion: 'neutral',
-      sidebarOpen: true, // Open sidebar by default on desktop
+      sidebarOpen: true,
+      personality: 'empathetic', // Default personality
 
       getActiveConversation: () => {
         const state = get();
@@ -64,7 +67,6 @@ export const useChatStore = create<ChatState>()(
         const updatedConversations = state.conversations.map(conv => {
           if (conv.id === state.activeConversationId) {
             let newTitle = conv.title;
-            // Auto-title based on first user message
             if (conv.messages.length === 1 && message.role === 'user') {
               newTitle = message.content.slice(0, 30) + (message.content.length > 30 ? '...' : '');
             }
@@ -94,21 +96,34 @@ export const useChatStore = create<ChatState>()(
         return { conversations: updatedConversations, currentEmotion: emotion };
       }),
 
+      setPersonality: (personality) => set({ personality }), // New action implementation
+
       sendMessage: async (content: string) => {
         const userMessage: Message = { role: 'user', content };
         
-        const detectedEmotion = detectEmotion(content);
-        get().setEmotion(detectedEmotion);
+        // 1. Check for safety/crisis FIRST
+        const safetyCheck = checkSafety(content);
         
         get().addMessage(userMessage);
         get().setLoading(true);
 
         try {
-          const activeConv = get().getActiveConversation();
-          if (!activeConv) return;
+          if (safetyCheck.isCrisis) {
+            // If it's a crisis, bypass the AI and send the safety message
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Fake delay for realism
+            get().addMessage({ role: 'assistant', content: safetyCheck.message });
+          } else {
+            // Normal AI flow
+            const detectedEmotion = detectEmotion(content);
+            get().setEmotion(detectedEmotion);
 
-          const aiText = await getAIResponse(activeConv.messages);
-          get().addMessage({ role: 'assistant', content: aiText });
+            const activeConv = get().getActiveConversation();
+            if (!activeConv) return;
+
+            // Pass the current personality to the AI
+            const aiText = await getAIResponse(activeConv.messages, get().personality);
+            get().addMessage({ role: 'assistant', content: aiText });
+          }
         } catch (error) {
           console.error("AI Error:", error);
           get().addMessage({ role: 'assistant', content: "I'm having a little trouble connecting right now. Please try again." });
@@ -123,7 +138,7 @@ export const useChatStore = create<ChatState>()(
           conversations: [newConversation, ...state.conversations],
           activeConversationId: newConversation.id,
           currentEmotion: 'neutral',
-          sidebarOpen: true // Open sidebar when creating new chat
+          sidebarOpen: true
         };
       }),
 
@@ -132,7 +147,7 @@ export const useChatStore = create<ChatState>()(
         return {
           activeConversationId: id,
           currentEmotion: conversation?.emotion || 'neutral',
-          sidebarOpen: window.innerWidth < 1024 ? false : state.sidebarOpen // Close on mobile after select
+          sidebarOpen: window.innerWidth < 1024 ? false : state.sidebarOpen
         };
       }),
 
@@ -159,16 +174,16 @@ export const useChatStore = create<ChatState>()(
       toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen }))
     }),
     {
-      name: 'mindmirror-storage', // Name of the item in Local Storage
+      name: 'mindmirror-storage',
       partialize: (state) => ({ 
         conversations: state.conversations, 
-        activeConversationId: state.activeConversationId 
-      }), // Only save these specific parts
+        activeConversationId: state.activeConversationId,
+        personality: state.personality // Save personality preference
+      }),
     }
   )
 );
 
-// Initialize: If no active conversation is set (e.g., on first load), set it to the first one
 const initialState = useChatStore.getState();
 if (!initialState.activeConversationId && initialState.conversations.length > 0) {
   useChatStore.setState({ activeConversationId: initialState.conversations[0].id });
